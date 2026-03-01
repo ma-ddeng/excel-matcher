@@ -4,126 +4,117 @@ from itertools import combinations
 import io
 import re
 
-st.set_page_config(page_title="회계 정밀 매칭 시스템", layout="wide")
+st.set_page_config(page_title="회계 전표-통장 완전 대조기", layout="wide")
 
-st.title("⚖️ 회계 데이터 N:M 정밀 대조 시스템")
-st.info("날짜별로 금액의 모든 조합을 뒤져서 '누가 누구랑 매칭됐는지' 행 번호를 추적합니다.")
+st.title("⚖️ 회계 데이터 행 단위 조합 매칭 시스템")
+st.markdown("더존의 A, B열과 신한의 A, B열을 각각 독립적으로 대조하여 매칭된 행 조합을 찾아냅니다.")
 
-# 데이터 세척 함수
 def clean_money(val):
     try:
         if pd.isna(val): return 0.0
         cleaned = re.sub(r'[^\d.-]', '', str(val))
         return float(cleaned) if cleaned else 0.0
-    except:
-        return 0.0
+    except: return 0.0
 
-def find_best_matching(targets, sources):
+def solve_nm_matching(list_left, list_right):
     """
-    targets: [(행번호, 금액), ...]
-    sources: [(행번호, 금액), ...]
+    N:M 매칭을 찾는 핵심 알고리즘
+    list_left: [(행번호, 금액), ...]
+    list_right: [(행번호, 금액), ...]
     """
-    matched_results = []
-    used_sources = set()
-    unmatched_targets = targets[:]
+    matches = []
+    used_left = set()
+    used_right = set()
 
-    # 금액이 큰 것부터 매칭 (큰 금액 에러를 먼저 잡기 위함)
-    targets_sorted = sorted(targets, key=lambda x: x[1], reverse=True)
+    # 1. 1:1 매칭 먼저 빠르게 처리
+    for l_idx, l_val in list_left:
+        for r_idx, r_val in list_right:
+            if r_idx not in used_right and abs(l_val - r_val) < 1:
+                matches.append({
+                    "유형": "1:1 매칭",
+                    "더존_행": str(l_idx), "더존_합계": l_val,
+                    "신한_행": str(r_idx), "신한_합계": r_val
+                })
+                used_left.add(l_idx)
+                used_right.add(r_idx)
+                break
 
-    for t_idx, t_val in targets_sorted:
-        if t_val == 0: continue
-        found = False
-        # 1:1부터 1:5 조합까지 탐색
-        for r in range(1, 6):
-            available = [s for s in sources if s not in used_sources]
-            for combo in combinations(available, r):
-                if abs(sum(c[1] for c in combo) - t_val) < 1: # 1원 미만 오차 허용
-                    source_info = ", ".join([f"{c[0]}행({c[1]:,.0f})" for c in combo])
-                    matched_results.append({
-                        "상태": "✅ 매칭성공",
-                        "기준_행번호": t_idx,
-                        "기준_금액": t_val,
-                        "대상_조합내역": source_info,
-                        "대상_합계": sum(c[1] for c in combo),
-                        "비고": f"{r}개 행 조합 일치"
-                    })
-                    for c in combo: used_sources.add(c)
-                    unmatched_targets = [ut for ut in unmatched_targets if ut[0] != t_idx]
-                    found = True
-                    break
-            if found: break
+    # 2. N:M 매칭 (남은 데이터들로 조합 탐색)
+    # 계산 복잡도를 위해 최대 4개 조합까지만 탐색
+    rem_left = [item for item in list_left if item[0] not in used_left]
+    rem_right = [item for item in list_right if item[0] not in used_right]
+
+    for r_l in range(1, 4):
+        for r_r in range(1, 4):
+            if r_l == 1 and r_r == 1: continue # 1:1은 위에서 함
             
-    unmatched_sources = [s for s in sources if s not in used_sources and s[1] != 0]
-    return matched_results, unmatched_targets, unmatched_sources
+            for combo_l in combinations([x for x in rem_left if x[0] not in used_left], r_l):
+                sum_l = sum(c[1] for c in combo_l)
+                for combo_r in combinations([x for x in rem_right if x[0] not in used_right], r_r):
+                    sum_r = sum(c[1] for c in combo_r)
+                    
+                    if abs(sum_l - sum_r) < 1:
+                        matches.append({
+                            "유형": f"{r_l}:{r_r} 조합매칭",
+                            "더존_행": ", ".join([str(c[0]) for c in combo_l]),
+                            "더존_합계": sum_l,
+                            "신한_행": ", ".join([str(c[0]) for c in combo_r]),
+                            "신한_합계": sum_r
+                        })
+                        for c in combo_l: used_left.add(c[0])
+                        for c in combo_r: used_right.add(c[0])
+                        break
+    
+    # 미매칭 내역 정리
+    unmatched_left = [{"행번호": l_idx, "금액": l_val} for l_idx, l_val in list_left if l_idx not in used_left]
+    unmatched_right = [{"행번호": r_idx, "금액": r_val} for r_idx, r_val in list_right if r_idx not in used_right]
+    
+    return matches, unmatched_left, unmatched_right
 
 # 파일 업로드
-col1, col2 = st.columns(2)
-with col1:
-    file_a = st.file_uploader("🏦 엑셀 A (신한은행 등)", type=['xlsx', 'xls'])
-with col2:
-    file_b = st.file_uploader("📑 엑셀 B (더존 등)", type=['xlsx', 'xls'])
+f_dz = st.file_uploader("📑 더존 엑셀 (A열: 입금/차변, B열: 출금/대변)", type=['xlsx', 'xls', 'csv'])
+f_sh = st.file_uploader("🏦 신한 엑셀 (A열: 입금액, B열: 출금액)", type=['xlsx', 'xls', 'csv'])
 
-if file_a and file_b:
-    try:
-        # 데이터 로드 (첫 행 제목 무시하고 안전하게 읽기)
-        df_a = pd.read_excel(file_a)
-        df_b = pd.read_excel(file_b)
+if f_dz and f_sh:
+    # 데이터 로드
+    dz = pd.read_csv(f_dz) if f_dz.name.endswith('.csv') else pd.read_excel(f_dz)
+    sh = pd.read_csv(f_sh) if f_sh.name.endswith('.csv') else pd.read_excel(f_sh)
 
-        if st.button("🔍 N:M 조합 매칭 분석 시작"):
-            # 1. 날짜 데이터 정제 (에러 방지용 errors='coerce')
-            # A열(0번째), B열(1번째) 가정
-            df_a['std_date'] = pd.to_datetime(df_a.iloc[:, 0].astype(str).str.replace('.', '-').str.replace('/', '-'), errors='coerce').dt.date
-            df_b['std_date'] = pd.to_datetime(df_b.iloc[:, 0].astype(str).str.replace('.', '-').str.replace('/', '-'), errors='coerce').dt.date
+    if st.button("🔍 데이터 조합 대조 시작"):
+        # 1. 데이터 추출 (행번호는 엑셀 눈금 기준인 index+2)
+        # 더존: A열(0), B열(1) / 신한: A열(1), B열(2) -> 샘플 구조에 맞춤
+        dz_in = [(i+2, clean_money(row[1])) for i, row in dz.iterrows() if clean_money(row[1]) > 0]
+        dz_out = [(i+2, clean_money(row[2])) for i, row in dz.iterrows() if clean_money(row[2]) > 0]
+        
+        sh_in = [(i+2, clean_money(row[1])) for i, row in sh.iterrows() if clean_money(row[1]) > 0]
+        sh_out = [(i+2, clean_money(row[2])) for i, row in sh.iterrows() if clean_money(row[2]) > 0]
+
+        # 2. 매칭 실행
+        in_matches, in_un_dz, in_un_sh = solve_nm_matching(dz_in, sh_in)
+        out_matches, out_un_dz, out_un_sh = solve_nm_matching(dz_out, sh_out)
+
+        # 3. 결과 표시
+        t1, t2, t3 = st.tabs(["✅ 매칭 성공 내역", "❌ 더존 미매칭", "❌ 신한 미매칭"])
+        
+        with t1:
+            st.subheader("입금(차변) 매칭")
+            df_in = pd.DataFrame(in_matches)
+            st.dataframe(df_in, use_container_width=True)
             
-            # 2. 금액 데이터 정제
-            df_a['std_amt'] = df_a.iloc[:, 1].apply(clean_money)
-            df_b['std_amt'] = df_b.iloc[:, 1].apply(clean_money)
+            st.subheader("출금(대변) 매칭")
+            df_out = pd.DataFrame(out_matches)
+            st.dataframe(df_out, use_container_width=True)
 
-            all_match_logs = []
-            all_error_logs = []
+        with t2:
+            st.write("더존에서 짝을 찾지 못한 금액들입니다.")
+            st.dataframe(pd.DataFrame(in_un_dz + in_un_sh), use_container_width=True)
 
-            # 두 파일의 유효한 날짜만 추출
-            target_dates = sorted(list(set(df_a['std_date'].dropna()) | set(df_b['std_date'].dropna())))
-
-            for d in target_dates:
-                # 해당 날짜 데이터 추출 (엑셀 행 번호 = index + 2)
-                sub_a = [(i+2, row['std_amt']) for i, row in df_a[df_a['std_date'] == d].iterrows() if row['std_amt'] != 0]
-                sub_b = [(i+2, row['std_amt']) for i, row in df_b[df_b['std_date'] == d].iterrows() if row['std_amt'] != 0]
-
-                if not sub_a and not sub_b: continue
-
-                # 매칭 알고리즘 가동
-                logs, un_a, un_b = find_best_matching(sub_a, sub_b)
-                
-                for l in logs:
-                    l['날짜'] = d
-                    all_match_logs.append(l)
-                
-                for ua in un_a:
-                    all_error_logs.append({"날짜": d, "파일": "엑셀 A", "행번호": ua[0], "금액": ua[1], "상태": "❌ 미매칭"})
-                for ub in un_b:
-                    all_error_logs.append({"날짜": d, "파일": "엑셀 B", "행번호": ub[0], "금액": ub[1], "상태": "❌ 미매칭"})
-
-            # 결과 화면
-            st.subheader("✅ 상세 매칭 결과")
-            if all_match_logs:
-                res_df = pd.DataFrame(all_match_logs)
-                st.dataframe(res_df, use_container_width=True)
-            
-            st.subheader("❌ 미매칭 내역 (확인 필요)")
-            if all_error_logs:
-                err_df = pd.DataFrame(all_error_logs)
-                st.error("서로 일치하는 조합을 찾지 못한 내역입니다.")
-                st.dataframe(err_df, use_container_width=True)
-
-            # 엑셀 다운로드
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                if all_match_logs: pd.DataFrame(all_match_logs).to_excel(writer, sheet_name='매칭성공', index=False)
-                if all_error_logs: pd.DataFrame(all_error_logs).to_excel(writer, sheet_name='미매칭내역', index=False)
-            
-            st.download_button("📥 매칭 결과 보고서 다운로드", output.getvalue(), "matching_report.xlsx")
-
-    except Exception as e:
-        st.error(f"분석 중 오류 발생: {e}")
-        st.info("엑셀의 A열이 날짜 형식이 맞는지, B열이 금액 형식이 맞는지 다시 한번 확인해주세요.")
+        # 4. 엑셀 다운로드 (모든 정보 포함)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            if in_matches: pd.DataFrame(in_matches).to_excel(writer, sheet_name='입금매칭_성공', index=False)
+            if out_matches: pd.DataFrame(out_matches).to_excel(writer, sheet_name='출금매칭_성공', index=False)
+            pd.DataFrame(in_un_dz).to_excel(writer, sheet_name='더존_미매칭', index=False)
+            pd.DataFrame(in_un_sh).to_excel(writer, sheet_name='신한_미매칭', index=False)
+        
+        st.download_button("📥 전체 분석 결과 엑셀 다운로드", output.getvalue(), "match_report.xlsx")
