@@ -3,97 +3,114 @@ import pandas as pd
 from itertools import combinations
 import io
 
-st.set_page_config(page_title="금액 매칭 프로", layout="wide")
+st.set_page_config(page_title="회계 전표-통장 매칭 시스템", layout="wide")
 
-st.title("⚖️ 엑셀 금액 교차 매칭 시스템")
-st.markdown("""
-A파일의 한 금액이 B파일의 **여러 행 금액의 합**과 일치하는지 찾아냅니다. 
-결과를 확인한 후 엑셀로 다운로드하세요.
-""")
+st.title("📂 회계 데이터 스마트 대조기 (N:M 대응)")
+st.info("날짜별로 입금(차변)과 출금(대변)의 합계를 대조하여 매칭 조합을 찾습니다.")
 
+# 1. 파일 업로드
 col1, col2 = st.columns(2)
 with col1:
-    file_a = st.file_uploader("📂 기준 파일 (A) 업로드", type=['xlsx'])
+    file_a = st.file_uploader("🏦 통장 거래내역 (신한은행 등)", type=['xlsx', 'xls'])
 with col2:
-    file_b = st.file_uploader("📂 비교 대상 파일 (B) 업로드", type=['xlsx'])
+    file_b = st.file_uploader("📑 회계 장부 (더존 등)", type=['xlsx', 'xls'])
 
 if file_a and file_b:
     df_a = pd.read_excel(file_a)
     df_b = pd.read_excel(file_b)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        col_a = st.selectbox("A파일 금액 컬럼", df_a.columns)
-    with c2:
-        col_b = st.selectbox("B파일 금액 컬럼", df_b.columns)
+    st.sidebar.header("⚙️ 컬럼 설정")
+    
+    # 통장 파일 컬럼 설정
+    st.sidebar.subheader("통장 파일 설정")
+    date_a = st.sidebar.selectbox("날짜 열 (A)", df_a.columns, key='da')
+    in_a = st.sidebar.selectbox("입금액 열 (B)", df_a.columns, key='ia')
+    out_a = st.sidebar.selectbox("출금액 열 (C)", df_a.columns, key='oa')
 
-    if st.button("🔍 매칭 분석 시작"):
-        # 데이터 정리: 행 번호(Index)를 포함하여 리스트화
-        # 행 번호는 엑셀 기준으로 표시하기 위해 +2 (헤더 1행 + 인덱스 0부터 시작)
-        list_a = [{"row": i+2, "val": v} for i, v in enumerate(df_a[col_a]) if pd.notna(v)]
-        list_b = [{"row": i+2, "val": v} for i, v in enumerate(df_b[col_b]) if pd.notna(v)]
+    # 회계 파일 컬럼 설정
+    st.sidebar.subheader("회계 파일 설정")
+    date_b = st.sidebar.selectbox("날짜 열 (A)", df_b.columns, key='db')
+    debit_b = st.sidebar.selectbox("차변(입금) 열 (B)", df_b.columns, key='deb')
+    credit_b = st.sidebar.selectbox("대변(출금) 열 (C)", df_b.columns, key='cre')
 
-        matched_data = []
-        unmatched_a = list_a[:]
-        unmatched_b = list_b[:]
+    if st.button("🚀 데이터 대조 분석 시작"):
+        # 전처리: 날짜 형식 통일 및 데이터 정리
+        df_a[date_a] = pd.to_datetime(df_a[date_a]).dt.date
+        df_b[date_b] = pd.to_datetime(df_b[date_b]).dt.date
+        
+        all_matches = []
+        errors = []
 
-        # 1단계: 1:1 매칭 우선 처리
-        for a_item in list_a:
-            for b_item in unmatched_b:
-                if a_item['val'] == b_item['val']:
-                    matched_data.append({
-                        "유형": "1:1 일치",
-                        "A행": a_item['row'], "A금액": a_item['val'],
-                        "B행": b_item['row'], "B금액": b_item['val']
-                    })
-                    if a_item in unmatched_a: unmatched_a.remove(a_item)
-                    unmatched_b.remove(b_item)
-                    break
+        # 모든 유니크한 날짜 추출
+        all_dates = sorted(list(set(df_a[date_a]) | set(df_b[date_b])))
 
-        # 2단계: 1:N 매칭 (A의 1개 = B의 여러 개 합)
-        # 성능을 위해 최대 4개 조합까지만 탐색
-        for a_item in unmatched_a[:]:
-            found = False
-            for r in range(2, 5): 
-                for combo in combinations(unmatched_b, r):
-                    if sum(c['val'] for c in combo) == a_item['val']:
-                        matched_data.append({
-                            "유형": f"1:{r} 조합매칭",
-                            "A행": a_item['row'], "A금액": a_item['val'],
-                            "B행": ", ".join([str(c['row']) for c in combo]),
-                            "B금액": " + ".join([str(c['val']) for c in combo])
-                        })
-                        unmatched_a.remove(a_item)
-                        for c in combo: unmatched_b.remove(c)
-                        found = True
-                        break
-                if found: break
+        for target_date in all_dates:
+            # 해당 날짜 데이터 필터링
+            sub_a = df_a[df_a[date_a] == target_date].copy()
+            sub_b = df_b[df_b[date_b] == target_date].copy()
 
-        # 결과 전시
-        st.subheader("📊 매칭 결과 리포트")
-        if matched_data:
-            res_df = pd.DataFrame(matched_data)
-            st.dataframe(res_df, use_container_width=True)
+            # --- 입금(차변) 대조 ---
+            vals_a = sub_a[in_a].fillna(0).tolist()
+            vals_b = sub_b[debit_b].fillna(0).tolist()
             
-            # 엑셀 다운로드 기능
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                res_df.to_excel(writer, index=False, sheet_name='Matching_Result')
-            
-            st.download_button(
-                label="📥 매칭 결과 엑셀 다운로드",
-                data=output.getvalue(),
-                file_name="matching_result.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("일치하는 항목이 없습니다.")
+            sum_a = sum(vals_a)
+            sum_b = sum(vals_b)
 
-        # 미매칭 항목 출력
-        col_err1, col_err2 = st.columns(2)
-        with col_err1:
-            st.error(f"❌ A 미매칭 ({len(unmatched_a)}건)")
-            st.write(pd.DataFrame(unmatched_a))
-        with col_err2:
-            st.error(f"❌ B 미매칭 ({len(unmatched_b)}건)")
-            st.write(pd.DataFrame(unmatched_b))
+            if sum_a == sum_b and sum_a > 0:
+                all_matches.append({
+                    "날짜": target_date, "구분": "입금/차변",
+                    "상태": "✅ 합계 일치", 
+                    "내용": f"통장({len(vals_a)}건) 합계 {sum_a:,.0f} == 장부({len(vals_b)}건) 합계 {sum_b:,.0f}"
+                })
+            elif sum_a != sum_b:
+                errors.append({
+                    "날짜": target_date, "구분": "입금/차변 오류",
+                    "통장합계": sum_a, "장부합계": sum_b, "차액": sum_a - sum_b,
+                    "비고": "휴먼에러 의심 (금액 불일치)"
+                })
+
+            # --- 출금(대변) 대조 ---
+            vals_a_out = sub_a[out_a].fillna(0).tolist()
+            vals_b_out = sub_b[credit_b].fillna(0).tolist()
+            
+            sum_a_out = sum(vals_a_out)
+            sum_b_out = sum(vals_b_out)
+
+            if sum_a_out == sum_b_out and sum_a_out > 0:
+                all_matches.append({
+                    "날짜": target_date, "구분": "출금/대변",
+                    "상태": "✅ 합계 일치", 
+                    "내용": f"통장({len(vals_a_out)}건) 합계 {sum_a_out:,.0f} == 장부({len(vals_b_out)}건) 합계 {sum_b_out:,.0f}"
+                })
+            elif sum_a_out != sum_b_out:
+                errors.append({
+                    "날짜": target_date, "구분": "출금/대변 오류",
+                    "통장합계": sum_a_out, "장부합계": sum_b_out, "차액": sum_a_out - sum_b_out,
+                    "비고": "내역 누락 또는 금액 오기입"
+                })
+
+        # 결과 표시
+        st.subheader("🔍 대조 결과 요약")
+        res_col, err_col = st.columns(2)
+        
+        with res_col:
+            st.success(f"정상 매칭: {len(all_matches)}건")
+            st.dataframe(pd.DataFrame(all_matches))
+        
+        with err_col:
+            st.error(f"불일치 오류: {len(errors)}건")
+            df_errors = pd.DataFrame(errors)
+            st.dataframe(df_errors)
+
+        # 엑셀 다운로드
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            if all_matches: pd.DataFrame(all_matches).to_excel(writer, sheet_name='정상매칭', index=False)
+            if errors: df_errors.to_excel(writer, sheet_name='오류리스트', index=False)
+        
+        st.download_button(
+            label="📥 대조 결과 리포트 다운로드",
+            data=output.getvalue(),
+            file_name=f"reconciliation_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
