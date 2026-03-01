@@ -16,8 +16,13 @@ with col2:
     file_b = st.file_uploader("📑 회계 장부 (더존 등)", type=['xlsx', 'xls'])
 
 if file_a and file_b:
-    df_a = pd.read_excel(file_a)
-    df_b = pd.read_excel(file_b)
+    # 엔진 설정을 통해 .xls와 .xlsx 모두 대응
+    try:
+        df_a = pd.read_excel(file_a)
+        df_b = pd.read_excel(file_b)
+    except Exception as e:
+        st.error(f"파일을 읽는 중 에러가 발생했습니다. requirements.txt에 xlrd가 있는지 확인하세요. 에러내용: {e}")
+        st.stop()
 
     st.sidebar.header("⚙️ 컬럼 설정")
     
@@ -34,83 +39,85 @@ if file_a and file_b:
     credit_b = st.sidebar.selectbox("대변(출금) 열 (C)", df_b.columns, key='cre')
 
     if st.button("🚀 데이터 대조 분석 시작"):
-        # 전처리: 날짜 형식 통일 및 데이터 정리
+        # 날짜 전처리 (다양한 형식을 날짜로 변환)
         df_a[date_a] = pd.to_datetime(df_a[date_a]).dt.date
         df_b[date_b] = pd.to_datetime(df_b[date_b]).dt.date
         
         all_matches = []
         errors = []
 
-        # 모든 유니크한 날짜 추출
-        all_dates = sorted(list(set(df_a[date_a]) | set(df_b[date_b])))
+        # 두 파일의 모든 날짜 모으기
+        all_dates = sorted(list(set(df_a[date_a].dropna()) | set(df_b[date_b].dropna())))
 
         for target_date in all_dates:
             # 해당 날짜 데이터 필터링
             sub_a = df_a[df_a[date_a] == target_date].copy()
             sub_b = df_b[df_b[date_b] == target_date].copy()
 
-            # --- 입금(차변) 대조 ---
-            vals_a = sub_a[in_a].fillna(0).tolist()
-            vals_b = sub_b[debit_b].fillna(0).tolist()
+            # --- [입금액 vs 차변] 대조 ---
+            bank_in = sub_a[in_a].fillna(0).sum()
+            book_debit = sub_b[debit_b].fillna(0).sum()
             
-            sum_a = sum(vals_a)
-            sum_b = sum(vals_b)
+            if (bank_in > 0 or book_debit > 0):
+                if bank_in == book_debit:
+                    all_matches.append({
+                        "날짜": target_date, "구분": "입금/차변",
+                        "상태": "✅ 합계 일치", 
+                        "금액": f"{bank_in:,.0f}",
+                        "상세": f"통장({len(sub_a[sub_a[in_a]>0])}건) == 장부({len(sub_b[sub_b[debit_b]>0])}건)"
+                    })
+                else:
+                    errors.append({
+                        "날짜": target_date, "구분": "입금/차변 오류",
+                        "통장합계": bank_in, "장부합계": book_debit, "차액": bank_in - book_debit,
+                        "비고": "금액 불일치 확인 필요"
+                    })
 
-            if sum_a == sum_b and sum_a > 0:
-                all_matches.append({
-                    "날짜": target_date, "구분": "입금/차변",
-                    "상태": "✅ 합계 일치", 
-                    "내용": f"통장({len(vals_a)}건) 합계 {sum_a:,.0f} == 장부({len(vals_b)}건) 합계 {sum_b:,.0f}"
-                })
-            elif sum_a != sum_b:
-                errors.append({
-                    "날짜": target_date, "구분": "입금/차변 오류",
-                    "통장합계": sum_a, "장부합계": sum_b, "차액": sum_a - sum_b,
-                    "비고": "휴먼에러 의심 (금액 불일치)"
-                })
-
-            # --- 출금(대변) 대조 ---
-            vals_a_out = sub_a[out_a].fillna(0).tolist()
-            vals_b_out = sub_b[credit_b].fillna(0).tolist()
+            # --- [출금액 vs 대변] 대조 ---
+            bank_out = sub_a[out_a].fillna(0).sum()
+            book_credit = sub_b[credit_b].fillna(0).sum()
             
-            sum_a_out = sum(vals_a_out)
-            sum_b_out = sum(vals_b_out)
+            if (bank_out > 0 or book_credit > 0):
+                if bank_out == book_credit:
+                    all_matches.append({
+                        "날짜": target_date, "구분": "출금/대변",
+                        "상태": "✅ 합계 일치", 
+                        "금액": f"{bank_out:,.0f}",
+                        "상세": f"통장({len(sub_a[sub_a[out_a]>0])}건) == 장부({len(sub_b[sub_b[credit_b]>0])}건)"
+                    })
+                else:
+                    errors.append({
+                        "날짜": target_date, "구분": "출금/대변 오류",
+                        "통장합계": bank_out, "장부합계": book_credit, "차액": bank_out - book_credit,
+                        "비고": "금액 불일치 확인 필요"
+                    })
 
-            if sum_a_out == sum_b_out and sum_a_out > 0:
-                all_matches.append({
-                    "날짜": target_date, "구분": "출금/대변",
-                    "상태": "✅ 합계 일치", 
-                    "내용": f"통장({len(vals_a_out)}건) 합계 {sum_a_out:,.0f} == 장부({len(vals_b_out)}건) 합계 {sum_b_out:,.0f}"
-                })
-            elif sum_a_out != sum_b_out:
-                errors.append({
-                    "날짜": target_date, "구분": "출금/대변 오류",
-                    "통장합계": sum_a_out, "장부합계": sum_b_out, "차액": sum_a_out - sum_b_out,
-                    "비고": "내역 누락 또는 금액 오기입"
-                })
-
-        # 결과 표시
-        st.subheader("🔍 대조 결과 요약")
-        res_col, err_col = st.columns(2)
+        # 결과 화면 출력
+        st.subheader("🔍 대조 분석 완료")
         
-        with res_col:
-            st.success(f"정상 매칭: {len(all_matches)}건")
-            st.dataframe(pd.DataFrame(all_matches))
+        tab1, tab2 = st.tabs(["✅ 정상 매칭", "❌ 불일치 오류"])
         
-        with err_col:
-            st.error(f"불일치 오류: {len(errors)}건")
-            df_errors = pd.DataFrame(errors)
-            st.dataframe(df_errors)
+        with tab1:
+            if all_matches:
+                st.dataframe(pd.DataFrame(all_matches), use_container_width=True)
+            else:
+                st.write("일치하는 내역이 없습니다.")
+        
+        with tab2:
+            if errors:
+                st.dataframe(pd.DataFrame(errors), use_container_width=True)
+            else:
+                st.success("모든 데이터의 합계가 일치합니다!")
 
-        # 엑셀 다운로드
+        # 엑셀 다운로드 파일 생성
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             if all_matches: pd.DataFrame(all_matches).to_excel(writer, sheet_name='정상매칭', index=False)
-            if errors: df_errors.to_excel(writer, sheet_name='오류리스트', index=False)
+            if errors: pd.DataFrame(errors).to_excel(writer, sheet_name='오류리스트', index=False)
         
         st.download_button(
             label="📥 대조 결과 리포트 다운로드",
             data=output.getvalue(),
-            file_name=f"reconciliation_report.xlsx",
+            file_name=f"매칭결과_{all_dates[0]}_{all_dates[-1]}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
