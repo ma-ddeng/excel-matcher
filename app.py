@@ -1,132 +1,116 @@
 import streamlit as st
 import pandas as pd
+from itertools import combinations
 import io
-import re
 
-st.set_page_config(page_title="회계-통장 끝판왕 대조기", layout="wide")
+st.set_page_config(page_title="회계 정밀 매칭 시스템", layout="wide")
 
-st.title("⚖️ 회계 데이터 스마트 대조기 (오류 방지 버전)")
-st.info("날짜 형식(./)이나 금액의 콤마(,)에 상관없이 당일 합계를 완벽하게 비교합니다.")
+st.title("⚖️ 회계 데이터 정밀 대조 및 추적 시스템")
+st.markdown("날짜별로 입금/출금의 **행 조합(N:M)**을 찾아내고 매칭 내역을 상세히 기록합니다.")
 
-# --- 유틸리티 함수: 데이터 세척 ---
-
-def clean_date(date_val):
-    """어떤 날짜 형식이든 YYYY-MM-DD 형태의 날짜 객체로 변환"""
-    try:
-        if pd.isna(date_val): return None
-        # 점(.)을 슬래시(/)나 대시(-)로 바꿔서 인식률 높임
-        date_str = str(date_val).replace('.', '-').replace('/', '-')
-        # 시간 정보가 포함되어 있다면 날짜만 추출
-        return pd.to_datetime(date_str).date()
-    except:
-        return None
-
-def clean_money(money_val):
-    """금액 열의 콤마, 문자 등을 제거하고 순수 숫자로 변환"""
-    try:
-        if pd.isna(money_val) or money_val == "": return 0.0
-        if isinstance(money_val, (int, float)): return float(money_val)
-        # 숫자가 아닌 것(콤마 등)은 제거
-        cleaned = re.sub(r'[^\d.-]', '', str(money_val))
-        return float(cleaned) if cleaned else 0.0
-    except:
-        return 0.0
-
-# --- 파일 업로드 섹션 ---
-
+# 1. 파일 업로드
 col1, col2 = st.columns(2)
 with col1:
-    file_a = st.file_uploader("🏦 통장 내역 업로드 (신한은행 등)", type=['xlsx', 'xls'])
+    file_a = st.file_uploader("🏦 신한은행 거래내역 (A)", type=['xlsx', 'xls', 'csv'])
 with col2:
-    file_b = st.file_uploader("📑 회계 장부 업로드 (더존 등)", type=['xlsx', 'xls'])
+    file_b = st.file_uploader("📑 더존 거래내역 (B)", type=['xlsx', 'xls', 'csv'])
+
+def find_subset_sum(targets, sources, max_r=5):
+    """
+    targets: 대상 금액 리스트 [(행번호, 금액), ...]
+    sources: 조합할 소스 리스트 [(행번호, 금액), ...]
+    """
+    matched_log = []
+    used_sources = set()
+    remaining_targets = targets[:]
+
+    for t_idx, t_val in targets:
+        found = False
+        # 1:1부터 1:N까지 탐색
+        for r in range(1, max_r + 1):
+            available_sources = [s for s in sources if s not in used_sources]
+            for combo in combinations(available_sources, r):
+                if abs(sum(c[1] for c in combo) - t_val) < 1: # 오차범위 1원 미만
+                    source_rows = [str(c[0]) for c in combo]
+                    matched_log.append({
+                        "결과": "✅ 매칭성공",
+                        "기준_행": t_idx,
+                        "기준_금액": t_val,
+                        "대상_조합행": ", ".join(source_rows),
+                        "대상_합계금액": sum(c[1] for c in combo),
+                        "비고": f"{r}개 행 조합 일치"
+                    })
+                    for c in combo: used_sources.add(c)
+                    remaining_targets = [rt for rt in remaining_targets if rt[0] != t_idx]
+                    found = True
+                    break
+            if found: break
+    
+    # 매칭 안 된 남은 것들 기록
+    unmatched_sources = [s for s in sources if s not in used_sources]
+    return matched_log, remaining_targets, unmatched_sources
 
 if file_a and file_b:
-    try:
-        # 파일 읽기
-        df_a = pd.read_excel(file_a)
-        df_b = pd.read_excel(file_b)
+    # 데이터 로드
+    df_a = pd.read_csv(file_a) if file_a.name.endswith('.csv') else pd.read_excel(file_a)
+    df_b = pd.read_csv(file_b) if file_b.name.endswith('.csv') else pd.read_excel(file_b)
+
+    # 날짜 처리 (A: 거래일시, B: 날짜)
+    df_a['std_date'] = pd.to_datetime(df_a.iloc[:, 0].astype(str).str[:10].str.replace('.', '-')).dt.date
+    df_b['std_date'] = pd.to_datetime(df_b.iloc[:, 0].astype(str).str[:10].str.replace('/', '-')).dt.date
+
+    # 분석 버튼
+    if st.button("🔍 행 단위 정밀 대조 시작"):
+        all_logs = []
+        all_unmatched = []
         
-        st.success("파일 로드 완료! 아래에서 컬럼을 확인하고 매칭을 시작하세요.")
-        
-        # 컬럼 선택 가이드 (사이드바)
-        st.sidebar.header("📍 컬럼 지정")
-        
-        with st.sidebar.expander("통장 파일(A) 컬럼"):
-            date_col_a = st.selectbox("날짜(거래일시)", df_a.columns, key='da')
-            in_col_a = st.selectbox("입금액", df_a.columns, key='ia')
-            out_col_a = st.selectbox("출금액", df_a.columns, key='oa')
+        target_dates = sorted(list(set(df_a['std_date'].dropna()) | set(df_b['std_date'].dropna())))
 
-        with st.sidebar.expander("회계 장부(B) 컬럼"):
-            date_col_b = st.selectbox("날짜(전표일자)", df_b.columns, key='db')
-            debit_col_b = st.selectbox("차변(입금)", df_b.columns, key='deb')
-            credit_col_b = st.selectbox("대변(출금)", df_b.columns, key='cre')
+        for d in target_dates:
+            # 해당 날짜 데이터 추출 (행 번호 보존을 위해 index+2 사용)
+            sub_a = df_a[df_a['std_date'] == d]
+            sub_b = df_b[df_b['std_date'] == d]
 
-        if st.button("🔍 데이터 정밀 대조 시작"):
-            # 1. 데이터 세척 (핵심 로직)
-            # 날짜 통일
-            df_a['clean_date'] = df_a[date_col_a].apply(clean_date)
-            df_b['clean_date'] = df_b[date_col_b].apply(clean_date)
+            # --- 입금(A) vs 차변(B) ---
+            # A의 입금액(2번째 열), B의 차변(2번째 열)
+            list_a_in = [(i+2, row[1]) for i, row in sub_a.iterrows() if row[1] > 0]
+            list_b_in = [(i+2, row[1]) for i, row in sub_b.iterrows() if row[1] > 0]
             
-            # 금액 숫자화
-            df_a['clean_in'] = df_a[in_col_a].apply(clean_money)
-            df_a['clean_out'] = df_a[out_a_col] if 'out_a_col' in locals() else df_a[out_col_a].apply(clean_money)
-            df_b['clean_debit'] = df_b[debit_col_b].apply(clean_money)
-            df_b['clean_credit'] = df_b[credit_col_b].apply(clean_money)
-
-            # 2. 날짜별 그룹화 합계 계산
-            # 통장 날짜별 합계
-            grp_a = df_a.groupby('clean_date').agg({'clean_in':'sum', 'clean_out':'sum'}).reset_index()
-            # 장부 날짜별 합계
-            grp_b = df_b.groupby('clean_date').agg({'clean_debit':'sum', 'clean_credit':'sum'}).reset_index()
-
-            # 3. 날짜 기준으로 두 데이터 합치기 (Outer Join)
-            total_dates = sorted(list(set(grp_a['clean_date'].dropna()) | set(grp_b['clean_date'].dropna())))
-            comparison_results = []
+            log, rem_a, rem_b = find_subset_sum(list_a_in, list_b_in)
+            for l in log: 
+                l['날짜'] = d
+                l['구분'] = "입금(차변)"
+                all_logs.append(l)
             
-            for d in total_dates:
-                row_a = grp_a[grp_a['clean_date'] == d]
-                row_b = grp_b[grp_b['clean_date'] == d]
-                
-                a_in = row_a['clean_in'].values[0] if not row_a.empty else 0
-                a_out = row_a['clean_out'].values[0] if not row_a.empty else 0
-                b_in = row_b['clean_debit'].values[0] if not row_b.empty else 0
-                b_out = row_b['clean_credit'].values[0] if not row_b.empty else 0
-                
-                # 입금 매칭 여부
-                in_status = "✅ 일치" if a_in == b_in else "❌ 불일치"
-                # 출금 매칭 여부
-                out_status = "✅ 일치" if a_out == b_out else "❌ 불일치"
-                
-                if a_in > 0 or b_in > 0:
-                    comparison_results.append({
-                        "날짜": d, "구분": "입금(차변)", 
-                        "통장금액": a_in, "장부금액": b_in, "차액": a_in - b_in, "결과": in_status
-                    })
-                if a_out > 0 or b_out > 0:
-                    comparison_results.append({
-                        "날짜": d, "구분": "출금(대변)", 
-                        "통장금액": a_out, "장부금액": b_out, "차액": a_out - b_out, "결과": out_status
-                    })
-
-            # 4. 결과 출력
-            res_df = pd.DataFrame(comparison_results)
+            # --- 출금(A) vs 대변(B) ---
+            # A의 출금액(3번째 열), B의 대변(3번째 열)
+            list_a_out = [(i+2, row[2]) for i, row in sub_a.iterrows() if row[2] > 0]
+            list_b_out = [(i+2, row[2]) for i, row in sub_b.iterrows() if row[2] > 0]
             
-            st.subheader("📊 대조 리포트")
-            if not res_df.empty:
-                # 결과 테이블 스타일링
-                def highlight_error(s):
-                    return ['background-color: #ffcccc' if v == "❌ 불일치" else '' for v in s]
-                
-                st.dataframe(res_df.style.apply(highlight_error, subset=['결과']), use_container_width=True)
-                
-                # 엑셀 다운로드
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    res_df.to_excel(writer, index=False, sheet_name='대조결과')
-                st.download_button("📥 대조 결과 엑셀 다운로드", output.getvalue(), "reconciliation_result.xlsx")
-            else:
-                st.warning("분석할 수 있는 데이터가 없습니다.")
+            log_out, rem_a_out, rem_b_out = find_subset_sum(list_a_out, list_b_out)
+            for l in log_out:
+                l['날짜'] = d
+                l['구분'] = "출금(대변)"
+                all_logs.append(l)
+            
+            # 매칭 실패 기록
+            for ra in rem_a + rem_a_out:
+                all_unmatched.append({"날짜": d, "파일": "신한은행(A)", "행번호": ra[0], "금액": ra[1]})
+            for rb in rem_b + rem_b_out:
+                all_unmatched.append({"날짜": d, "파일": "더존(B)", "행번호": rb[0], "금액": rb[1]})
 
-    except Exception as e:
-        st.error(f"프로그램 실행 중 예상치 못한 오류가 발생했습니다: {e}")
-        st.info("사이드바에서 날짜와 금액 컬럼을 정확히 선택했는지 확인해주세요.")
+        # 결과 출력
+        st.subheader("✅ 매칭 성공 내역 (상세 추적)")
+        match_df = pd.DataFrame(all_logs)
+        st.dataframe(match_df, use_container_width=True)
+
+        st.subheader("❌ 매칭 실패 내역 (휴먼에러 의심)")
+        unmatch_df = pd.DataFrame(all_unmatched)
+        st.dataframe(unmatch_df, use_container_width=True)
+
+        # 엑셀 다운로드
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            match_df.to_excel(writer, sheet_name='매칭성공_추적', index=False)
+            unmatch_df.to_excel(writer, sheet_name='매칭실패_확인필요', index=False)
+        st.download_button("📥 최종 리포트 다운로드", output.getvalue(), "final_report.xlsx")
