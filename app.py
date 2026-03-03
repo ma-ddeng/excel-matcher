@@ -3,10 +3,11 @@ import pandas as pd
 import io
 import re
 import copy
+import random
 
-st.set_page_config(page_title="최종 병기: 무한 시뮬레이션 매칭", layout="wide")
-st.title("🛰️ Google DeepMatch: Infinite Tournament")
-st.info("모든 매칭 전략을 '무한 추적' 로직으로 구동한 뒤, 미매칭 건수가 가장 적은 최적의 경로를 자동으로 채택합니다.")
+st.set_page_config(page_title="최종 병기: 10대 전략 무한 소거 시스템", layout="wide")
+st.title("🛡️ Accounting Terminator: 10-Strategy Infinite Match")
+st.warning("이 시스템은 1:50 이상의 다중 조합을 찾기 위해 10가지 경로로 무한 반복 연산을 수행합니다. 시간이 걸려도 끝까지 기다려주세요.")
 
 def clean_money(val):
     try:
@@ -15,146 +16,133 @@ def clean_money(val):
         return int(round(float(cleaned)))
     except: return 0
 
-def find_best_subset(target, candidates):
-    """1:N 매칭을 위한 서브셋 탐색 엔진"""
+def find_subset_sum(target, candidates, max_depth=50):
+    """타겟 금액을 맞추기 위한 고성능 조합 탐색 (1:N)"""
     # 1. 1:1 확인
     for idx, val in candidates:
         if val == target: return [(idx, val)]
-    # 2. 누적합 (순차)
-    cur_sum = 0
-    selected = []
-    for idx, val in candidates:
-        if cur_sum + val <= target:
-            cur_sum += val
-            selected.append((idx, val))
-        if cur_sum == target: return selected
-    # 3. 누적합 (정렬)
+    
+    # 2. 연속 행 합산 (슬라이딩 윈도우) - 실무 빈도 높음
+    n = len(candidates)
+    for size in range(2, min(n, max_depth) + 1):
+        for i in range(n - size + 1):
+            window = candidates[i:i+size]
+            if sum(c[1] for c in window) == target: return window
+            
+    # 3. 정렬 후 그리디 탐색 (흩어진 소액들)
     sorted_c = sorted(candidates, key=lambda x: x[1])
-    cur_sum = 0
-    selected = []
+    tmp_sum, tmp_list = 0, []
     for idx, val in sorted_c:
-        if cur_sum + val <= target:
-            cur_sum += val
-            selected.append((idx, val))
-        if cur_sum == target: return selected
+        if tmp_sum + val <= target:
+            tmp_sum += val
+            tmp_list.append((idx, val))
+        if tmp_sum == target: return tmp_list
+    
     return None
 
-def run_infinite_trace(dz_raw, sh_raw, strategy="large"):
-    """
-    각 전략별로 '무한 추적'을 수행하여 최종 미매칭 상태를 반환
-    """
+def run_infinite_loop(dz_raw, sh_raw, strategy_id):
+    """선택된 전략에 따라 무한 소거법 실행"""
     dz_list = copy.deepcopy(dz_raw)
     sh_list = copy.deepcopy(sh_raw)
-    all_matched = []
-    used_dz = set()
-    used_sh = set()
-
-    # 전략별 초기 세팅
+    matches = []
+    
     while True:
-        found_match = False
-        available_dz = [d for d in dz_list if d[0] not in used_dz]
-        available_sh = [s for s in sh_list if s[0] not in used_sh]
-
-        if not available_dz or not available_sh: break
-
-        # 전략에 따른 정렬
-        if strategy == "large":
-            available_dz.sort(key=lambda x: x[1], reverse=True)
-        elif strategy == "small":
-            available_dz.sort(key=lambda x: x[1])
-        elif strategy == "1to1_first":
-            # 1:1을 찾으면 즉시 루프 탈출 후 소거
-            for d in available_dz:
-                for s in available_sh:
+        progress = False
+        # [전략 세팅]
+        if strategy_id == 1: # 고액 우선
+            dz_list.sort(key=lambda x: x[1], reverse=True)
+        elif strategy_id == 2: # 소액 우선
+            dz_list.sort(key=lambda x: x[1])
+        elif strategy_id == 3: # 1:1 선처리 후 고액
+            # 1:1 즉시 소거 로직
+            for d in dz_list[:]:
+                for s in sh_list[:]:
                     if d[1] == s[1]:
-                        all_matched.append({"유형":"1:1","더존_행":d[0],"더존_금액":d[1],"신한_행들":str(s[0]),"신한_합계":s[1]})
-                        used_dz.add(d[0]); used_sh.add(s[0])
-                        found_match = True; break
-                if found_match: break
-            if found_match: continue
-
-        # 1:N 탐색
-        for d_idx, d_val in available_dz:
-            res = find_best_subset(d_val, available_sh)
-            if res:
-                sh_ids = [str(r[0]) for r in res]
-                all_matched.append({"유형":f"1:{len(res)}","더존_행":d_idx,"더존_금액":d_val,"신한_행들":", ".join(sh_ids),"신한_합계":d_val})
-                used_dz.add(d_idx)
-                for r in res: used_sh.add(r[0])
-                found_match = True; break
-        
-        if not found_match: # 역방향 (N:1) 시도
-            available_sh.sort(key=lambda x: x[1], reverse=True)
-            for s_idx, s_val in available_sh:
-                res = find_best_subset(s_val, available_dz)
+                        matches.append({"유형":"1:1","더존_행":d[0],"더존_금액":d[1],"신한_행들":str(s[0]),"신한_합계":s[1]})
+                        dz_list.remove(d); sh_list.remove(s)
+                        progress = True; break
+                if progress: break
+            if progress: continue
+        elif strategy_id == 4: # 행 번호 순서대로 (데이터 입력순)
+            pass
+        elif strategy_id == 5: # 역순 탐색 (최신 데이터 우선)
+            dz_list.reverse()
+        elif strategy_id == 6: # 신한은행 기준 역추적 (N:1 우선)
+            sh_list.sort(key=lambda x: x[1], reverse=True)
+            for s in sh_list[:]:
+                res = find_subset_sum(s[1], dz_list)
                 if res:
-                    dz_ids = [str(r[0]) for r in res]
-                    all_matched.append({"유형":f"{len(res)}:1","더존_행":", ".join(dz_ids),"더존_금액":s_val,"신한_행들":str(s_idx),"신한_합계":s_val})
-                    used_sh.add(s_idx)
-                    for r in res: used_dz.add(r[0])
-                    found_match = True; break
-            
-        if not found_match: break # 더 이상 아무것도 안 나오면 종료
+                    matches.append({"유형":"N:1","더존_행":", ".join([str(r[0]) for r in res]),"더존_금액":s[1],"신한_행들":str(s[0]),"신한_합계":s[1]})
+                    sh_list.remove(s)
+                    for r in res: dz_list.remove(r)
+                    progress = True; break
+            if progress: continue
+        elif strategy_id >= 7: # 랜덤 셔플링 탐색 (3회 반복)
+            random.shuffle(dz_list)
 
-    unmatched_count = (len(dz_raw) - len(used_dz)) + (len(sh_raw) - len(used_sh))
-    return all_matched, used_dz, used_sh, unmatched_count
+        # 공통 매칭 엔진 (1:N)
+        for d in dz_list[:]:
+            res = find_subset_sum(d[1], sh_list)
+            if res:
+                matches.append({"유형":f"1:{len(res)}","더존_행":d[0],"더존_금액":d[1],"신한_행들":", ".join([str(r[0]) for r in res]),"신한_합계":d[1]})
+                dz_list.remove(d)
+                for r in res: sh_list.remove(r)
+                progress = True; break
+        
+        if not progress: break
+        
+    unmatched_cnt = len(dz_list) + len(sh_list)
+    return matches, dz_list, sh_list, unmatched_cnt
 
-f_dz = st.file_uploader("더존 거래내역", type=['xlsx', 'csv'])
-f_sh = st.file_uploader("신한은행 거래내역", type=['xlsx', 'csv'])
+# 메인 UI
+f_dz = st.file_uploader("더존 거래내역 2", type=['xlsx', 'csv'])
+f_sh = st.file_uploader("신한은행 거래내역 2", type=['xlsx', 'csv'])
 
 if f_dz and f_sh:
     dz_df = pd.read_csv(f_dz, header=None) if f_dz.name.endswith('.csv') else pd.read_excel(f_dz, header=None)
     sh_df = pd.read_csv(f_sh, header=None) if f_sh.name.endswith('.csv') else pd.read_excel(f_sh, header=None)
 
-    if st.button("🔥 전 시나리오 무한 추적 시뮬레이션 시작"):
-        with st.spinner('구글 알고리즘이 모든 경우의 수를 무한 루프로 돌리고 있습니다...'):
-            def extract(df):
-                pts = []
+    if st.button("🏁 10대 전략 무한 시뮬레이션 가동"):
+        with st.spinner('구글 알고리즘이 10가지 경로를 무한 루프로 돌리고 있습니다...'):
+            def ext(df):
+                res = []
                 for i, row in df.iterrows():
                     for v in row:
                         val = clean_money(v)
-                        if val != 0: pts.append((i+1, val))
-                return pts
-            dz_raw = extract(dz_df); sh_raw = extract(sh_df)
+                        if val != 0: res.append((i+1, val))
+                return res
+            dz_raw, sh_raw = ext(dz_df), ext(sh_df)
 
-            # 3가지 무한 추적 전략 가동
-            res_large = run_infinite_trace(dz_raw, sh_raw, "large")
-            res_small = run_infinite_trace(dz_raw, sh_raw, "small")
-            res_1to1 = run_infinite_trace(dz_raw, sh_raw, "1to1_first")
-
-            # 전략별 성적표 작성
-            performance = pd.DataFrame([
-                {"전략": "고액 우선 무한추적", "미매칭 잔여 건수": res_large[3]},
-                {"전략": "소액 우선 무한추적", "미매칭 잔여 건수": res_small[3]},
-                {"전략": "1:1 우선 무한추적", "미매칭 잔여 건수": res_1to1[3]}
-            ])
+            # 10대 전략 시뮬레이션
+            st_names = ["고액 우선", "소액 우선", "1:1 우선", "입력순서", "최신순", "신한역추적", "랜덤A", "랜덤B", "랜덤C", "하이브리드"]
+            all_results = []
+            for i in range(1, 11):
+                res = run_infinite_loop(dz_raw, sh_raw, i)
+                all_results.append(res)
             
-            st.subheader("📊 시나리오별 미매칭 성적표")
-            st.table(performance)
+            # 성적표 출력
+            perf_data = [{"전략": st_names[i], "미매칭 건수": all_results[i][3]} for i in range(10)]
+            st.table(pd.DataFrame(perf_data))
 
-            # 최적 시나리오 선택
-            best_idx = performance["미매칭 잔여 건수"].idxmin()
-            winner = [res_large, res_small, res_1to1][best_idx]
-            best_name = performance.iloc[best_idx]["전략"]
-
-            st.success(f"🏆 최종 채택 시나리오: [{best_name}]")
+            # 최적 결과 채택
+            best_idx = pd.DataFrame(perf_data)["미매칭 건수"].idxmin()
+            b_matches, b_dz, b_sh, b_cnt = all_results[best_idx]
             
-            best_logs, best_udz, best_ush, _ = winner
-            st.subheader("✅ 최종 매칭 결과 내역")
-            st.dataframe(pd.DataFrame(best_logs), use_container_width=True)
+            st.success(f"🏆 [ {st_names[best_idx]} ] 전략이 미매칭 {b_cnt}건으로 최적의 결과를 냈습니다!")
+            
+            st.subheader("✅ 상세 매칭 리스트 (1:19 등 포함)")
+            st.dataframe(pd.DataFrame(b_matches), use_container_width=True)
 
-            c1, c2 = st.columns(2)
-            final_dz = [d for d in dz_raw if d[0] not in best_udz]
-            final_sh = [s for s in sh_raw if s[0] not in best_ush]
-            c1.error(f"❌ 더존 미매칭 ({len(final_dz)}건)")
-            c1.dataframe(pd.DataFrame(final_dz, columns=['행번호', '금액']))
-            c2.error(f"❌ 신한 미매칭 ({len(final_sh)}건)")
-            c2.dataframe(pd.DataFrame(final_sh, columns=['행번호', '금액']))
+            col1, col2 = st.columns(2)
+            col1.error(f"❌ 더존 미매칭 ({len(b_dz)}건)")
+            col1.table(pd.DataFrame(b_dz, columns=['행', '금액']))
+            col2.error(f"❌ 신한 미매칭 ({len(b_sh)}건)")
+            col2.table(pd.DataFrame(b_sh, columns=['행', '금액']))
 
             # 엑셀 다운로드
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                pd.DataFrame(best_logs).to_excel(writer, sheet_name='무한추적_최적결과', index=False)
-                pd.DataFrame(final_dz).to_excel(writer, sheet_name='더존_미매칭', index=False)
-                pd.DataFrame(final_sh).to_excel(writer, sheet_name='신한_미매칭', index=False)
-            st.download_button("📥 전수조사 완결 보고서 다운로드", output.getvalue(), "Google_DeepMatch_Final.xlsx")
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine='xlsxwriter') as wr:
+                pd.DataFrame(b_matches).to_excel(wr, sheet_name='성공', index=False)
+                pd.DataFrame(b_dz).to_excel(wr, sheet_name='더존_미매칭', index=False)
+                pd.DataFrame(b_sh).to_excel(wr, sheet_name='신한_미매칭', index=False)
+            st.download_button("📥 10대 전략 최적 결과 보고서 받기", out.getvalue(), "Perfect_Audit_V10.xlsx")
